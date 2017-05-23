@@ -5,6 +5,8 @@ import argparse
 import re
 import csv
 import json
+import sys
+from getpass import getpass
 
 from selenium import webdriver
 from selenium.webdriver.common.keys import Keys
@@ -45,7 +47,7 @@ def login_to_tigernet_with_driver(driver, load_cookies):
 
     # Click on login
     driver.find_element_by_id('cid_40_rptSsoProviders_ctl02_btnProvider').click()
-    print('Logging In')
+    print('Attempting to log in')
 
     # if we logged in successfully with cookies we shouldn't
     # see a login link - check edge cases here, sometimes it was
@@ -66,19 +68,60 @@ def login_to_tigernet_with_driver(driver, load_cookies):
         # Fill out fields and log in
         username = driver.find_element_by_id('username')
         password = driver.find_element_by_id('password')
-        username.send_keys(os.getenv('USERNAME'))
-        password.send_keys(os.getenv('PASSWORD'))
+        try:
+            username.send_keys(os.getenv('USERNAME'))
+            password.send_keys(os.getenv('PASSWORD'))
+        except:
+            print('Username and password environment variables not found; please enter your username and password.\n(don\'t worry, these are not saved).')
+            username.send_keys(sanitized_input('Username: '))
+            password.send_keys(getpass('Password: '))
+            print('Attempting to log in')
+
+
         driver.find_element_by_name('submit').click()
+
+        # see if duo-authentication is visible
+        duo_visible = check_exists_by_css_selector(
+            '#duo_iframe',
+            driver
+            )
+        if duo_visible:
+            print('Duo authentication iframe visible')
+            driver.switch_to_frame('duo_iframe')
+
+            print('Clicking \'Remember me for 90 days\' checkbox')
+            driver.find_element_by_xpath('//*[@id="login-form"]/div/div/label/input').click()
+
+            print('Duo authentication required; how would you like to proceed?\nOptions: (\'push\') [TODO (not implemented): \'call\', \'passcode\']')
+
+            duo_method = sanitized_input(': ')
+            while duo_method not in ['push']: #, 'call', 'passcode']
+                print('Please choose one of the available authentication options:\n(\'push\') [TODO (not implemented): \'call\', \'passcode\']')
+                duo_method = sanitized_input(': ')
+            if duo_method == 'push':
+                push_button = driver.find_element_by_css_selector('#login-form > fieldset:nth-child(10) > div.row-label.push-label > button')
+                push_button.click()
+            elif duo_method == 'call':
+                raise ValueError(duo_method + ' not yet implemented.')
+            elif duo_method == 'passcode':
+                raise ValueError(duo_method + ' not yet implemented.')
+            else:
+                raise ValueError('Somehow an invalid value for duo_method made it past sanitized user input; please debug.')
+
 
         # see if we can see the link to the alumni search page
         # which would mean we logged in successfully.
         link_visible = check_exists_by_css_selector(
-                '#imodcmscalendar1016 > table > tbody > tr:nth-child(2) > td > div > div > div:nth-child(2) > div.thumb > a',
-                driver
+            '#imodcmscalendar1016 > table > tbody > tr:nth-child(2) > td > div > div > div:nth-child(2) > div.thumb > a',
+            driver
             )
         if link_visible:
             print('Saving Login Cookies')
             pickle.dump( driver.get_cookies() , open("cookies.pkl","wb"))
+        else:
+            raise Exception(
+                'Could not log in - please try a different driver type (e.g. chrome) to diagnose'
+                )
 
 
 # Scrape by index
@@ -435,11 +478,20 @@ def get_mongo_alumni_collection():
     db = client.alumni
     return db.alumni
 
-def get_driver_and_login():
+def get_driver_and_login(driver_type = 'chrome', wait_time = 30):
     # Create selenium webdriver
-    driver = webdriver.Chrome()
-    driver.implicitly_wait(30)
-    print('Starting Crawler')
+    driver = None
+    if driver_type == 'chrome':
+        driver = webdriver.Chrome()
+    elif driver_type == 'phantom':
+        driver = webdriver.PhantomJS()
+    else:
+        raise ValueError(
+            'Invalid driver type; driver must be \'chrome\' or \'phantom\''
+            )
+
+    driver.implicitly_wait(wait_time)
+    print('Starting crawler with %s driver and %d second implicit wait time.' % (driver_type, wait_time))
     login_to_tigernet_with_driver(driver, args.load_cookies)
     return driver
 
@@ -449,16 +501,16 @@ def quit_driver(driver):
 
 def main(args):
     if args.type == 'search':
-        driver = get_driver_and_login()
+        driver = get_driver_and_login(args.driver_type, args.wait_time)
         scrape_by_query_with_driver(driver)
         quit_driver(driver)
     elif args.type == 'range':
-        driver = get_driver_and_login()
+        driver = get_driver_and_login(args.driver_type, args.wait_time)
         adb = get_mongo_alumni_collection()
         scrape_from_index_with_driver_with_database(driver, adb)
         quit_driver(driver)
     elif args.type == 'queue':
-        driver = get_driver_and_login()
+        driver = get_driver_and_login(args.driver_type, args.wait_time)
         adb = get_mongo_alumni_collection()
         scrape_from_queue_with_driver_with_database(driver, adb)
         quit_driver(driver)
@@ -483,7 +535,18 @@ if __name__ == '__main__':
         )
     parser.add_argument(
         'type',
-        help = 'Type of scraping to do; can be \'search\', \'range\', or \'queue\'.',
+        help = 'type of scraping to do; can be \'search\', \'range\', \'local\', or \'queue\'.'
+        )
+    parser.add_argument(
+        '-dt',
+        '--driver_type',
+        help = 'type of driver to use; can be \'chrome\' (default) or \'phantom\'.'
+        )
+    parser.add_argument(
+        '-wt',
+        '--wait_time',
+        help = 'number of seconds for driver to implicitly wait; defaults to 30.',
+        type = int
         )
     args = parser.parse_args()
     main(args)
