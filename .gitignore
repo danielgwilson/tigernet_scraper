@@ -1,6 +1,8 @@
 process.env
 cookies.pkl
 *.csv
+keys.json
+keys.txt
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

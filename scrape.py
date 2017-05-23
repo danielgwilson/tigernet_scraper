@@ -4,6 +4,7 @@ import time
 import argparse
 import re
 import csv
+import json
 
 from selenium import webdriver
 from selenium.webdriver.common.keys import Keys
@@ -137,7 +138,7 @@ def alumnus_url_with_index(index):
     return 'http://tigernet.princeton.edu/s/1760/02-tigernet/index.aspx?sid=1760&gid=2&pgid=275&cid=735&mid=' + str(index) + '#/PersonalProfile'
 
 
-# Scrape by index
+# Scrape from queue
 def scrape_from_queue_with_driver_with_database(driver, database):
     response = input('How many values should we scrape from the alumni link queue? (1 - 50): ')
     # While response has non-alphanumeric characters
@@ -313,6 +314,18 @@ def sanitized_input(msg):
 
     return response
 
+def sanitized_input_with_spaces(msg):
+    response = input(msg)
+    # While response has non-alphanumeric characters
+    # see https://docs.python.org/2/howto/regex.html
+    while not re.search('[\w\s]', response):
+        print("ERROR: Illegal query - please use only letters, numbers, and spaces")
+
+        # ask again since incorrect
+        response = input(msg)
+
+    return response
+
 def get_alumni_search_result_links_with_driver_with_query(driver, query):
     # handle pagination
     num_results = int(
@@ -359,31 +372,103 @@ def get_alumni_search_result_links_with_driver_with_query(driver, query):
     print('Finished saving alumni page links from search')
 
 
-def main(args):
-    if args.type != 'search' and args.type != 'range' and args.type != 'queue':
-        raise ValueError('Argument \'type\' must be \'search\', \'range\', or \'queue\'.')
+# Search local database
+def search_locally_by_query_with_database(database):
+    print('Getting local results from database')
+    for result in get_search_locally_by_query_with_database(database):
+        print(result)
 
+def search_locally_by_query_with_database_to_csv(database):
+    results = get_search_locally_by_query_with_database(database)
+    keys = get_keys_for_database(database)
+    with open('search_results.csv', 'w') as csvfile:
+        print('Writing to csv file')
+        writer = csv.DictWriter(csvfile, keys)
+        writer.writeheader()
+        writer.writerows(results)
+
+def get_search_locally_by_query_with_database(database):
+    print('You can query by any combination (one at a time) of the following keys: ')
+    print_keys_for_database(database)
+
+    keys = get_keys_for_database(database)
+
+    query = sanitized_input_with_spaces('Please enter your search KEY (e.g. \'Employer\'): ')
+    while not query in keys and query != 'done':
+        print('ERROR: Please choose a search key from the above list of options. If finished, please type \'done\'.')
+        query = sanitized_input_with_spaces('KEY (e.g. \'Employer\'): ')
+
+    query_value = sanitized_input_with_spaces('What value would you like to search for?: ')
+    regx = re.compile(query_value, re.IGNORECASE)
+    return database.find({query : regx})
+
+# Refactor database
+def clean_colons_in_database(database):
+    print('Cleaning colons - this shouldn\'t be used')
+    with open('keys.json') as json_file:
+        data = json.load(json_file)
+        colon_keys = []
+        for object in data:
+            key = object['_id']['key']
+            if key[-1] == ':':
+                print('Updating ' + key)
+                database.update_many({}, {'$rename': {key : key[:-1]}}, upsert = False)
+
+# print keys from variety map reduce json file - must be kept updated
+def print_keys_for_database(database):
+    for key in get_keys_for_database(database):
+        print(key)
+
+def get_keys_for_database(database):
+    keys = []
+    with open('keys.json') as json_file:
+        data = json.load(json_file)
+        for object in data:
+            key = object['_id']['key']
+            keys.append(key)
+
+    return keys
+
+def get_mongo_alumni_collection():
+    print('Connecting to Mongo')
+    client = MongoClient()
+    db = client.alumni
+    return db.alumni
+
+def get_driver_and_login():
     # Create selenium webdriver
     driver = webdriver.Chrome()
     driver.implicitly_wait(30)
-
     print('Starting Crawler')
     login_to_tigernet_with_driver(driver, args.load_cookies)
+    return driver
 
-    if args.type == 'search':
-        scrape_by_query_with_driver(driver)
-    else:
-        print('Connecting to Mongo')
-        client = MongoClient()
-        db = client.alumni
-        adb = db.alumni
-        if args.type == 'range':
-            scrape_from_index_with_driver_with_database(driver, adb)
-        else:
-            scrape_from_queue_with_driver_with_database(driver, adb)
-
+def quit_driver(driver):
     driver.quit()
     print('Closing Browser')
+
+def main(args):
+    if args.type == 'search':
+        driver = get_driver_and_login()
+        scrape_by_query_with_driver(driver)
+        quit_driver(driver)
+    elif args.type == 'range':
+        driver = get_driver_and_login()
+        adb = get_mongo_alumni_collection()
+        scrape_from_index_with_driver_with_database(driver, adb)
+        quit_driver(driver)
+    elif args.type == 'queue':
+        driver = get_driver_and_login()
+        adb = get_mongo_alumni_collection()
+        scrape_from_queue_with_driver_with_database(driver, adb)
+        quit_driver(driver)
+    elif args.type == 'local':
+        adb = get_mongo_alumni_collection()
+        search_locally_by_query_with_database_to_csv(adb)
+    else:
+        raise ValueError(
+            'Argument \'type\' must be \'search\', \'range\', \'local\', or \'queue\'.'
+            )
 
     print('Finished!')
 
